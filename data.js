@@ -35,7 +35,7 @@ const LEVELS = [
     },
     mnemonic: "When i and e go walking, the last one does the talking.",
     dictation: {
-      instructions: "Listen to each word — it's read slowly. Write it in your exercise book.",
+      instructions: "Listen to each word — it's read slowly. Write it in your homework book.",
       words: ["Brief", "Arbeit", "Tier", "Kleid", "Miete"]
     }
   }
