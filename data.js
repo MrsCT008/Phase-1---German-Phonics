@@ -12,7 +12,7 @@
  * Words that are phonetically similar but spelled a third way (e.g.
  * "Bayern" for the /aɪ/ sound) must NOT appear here — that ambiguity is
  * fine for a later "spot the odd spelling" level, but would make this
- * level's discrimination/dictation pair misleading.
+ * level's discrimination/spelling pair misleading.
  */
 
 const LEVELS = [
@@ -24,19 +24,25 @@ const LEVELS = [
       soundHint: "long ee", // plain-English description, no IPA notation
       label: "long ee, like English 'see'",
       exampleWord: "Liebe",
-      words: ["Liebe", "Bier", "Fieber", "Tier", "viel", "Brief", "Miete", "Sie"]
+      words: ["Liebe", "Bier", "Fieber", "Tier", "viel", "Brief", "Miete", "Sie", "hier"]
     },
     patternB: {
       grapheme: "ei",
       soundHint: "eye",
       label: "like English 'eye'",
       exampleWord: "Bein",
-      words: ["Bein", "klein", "Arbeit", "Wein", "Kleid", "Eis", "Reise", "Weise"]
+      words: ["Bein", "klein", "Arbeit", "Wein", "Kleid", "Eis", "Reise", "Weise", "ein", "mein"]
     },
     mnemonic: "When i and e go walking, the last one does the talking.",
+    production: {
+      words: ["ein", "Bein", "Tier", "Bier", "Brief", "klein"]
+    },
+    spelling: {
+      words: ["ein", "Bein", "Tier", "Bier", "Brief", "klein"]
+    },
     dictation: {
-      instructions: "Listen to each word — it's read slowly. Type what you hear.",
-      words: ["Liebe", "Bier", "Fieber", "Tier", "Brief", "Miete", "Bein", "klein", "Arbeit", "Kleid", "Eis"]
+      instructions: "Listen to each word — it's read slowly. Write it in your Homework book.",
+      words: ["Eis", "Tier", "hier", "klein", "mein", "sie"]
     }
   }
 ];
@@ -46,19 +52,20 @@ const LEVELS = [
  * - "viel" and "Sie" are the shortest ie-words; short items make good
  *   discrimination items but are less interesting to record aloud
  *   — kept in for now, revisit if Production stage drags for these two.
- * - Dictation is now marked in-app (the student types what they hear), so
- *   its word list is restricted to words where every letter OTHER than
- *   ie/ei is pronounced the same way it would be in English — nothing
- *   the class hasn't been taught the sound for yet. Excluded on that
- *   basis, with the untaught letter in brackets: "viel" (v → f sound),
- *   "Sie" (word-initial s → z sound), "Wein" and "Weise" (w → v sound).
- *   "Reise" is also left out — its "s" sits between two vowels, which
- *   Germans voice the same way as word-initial s; this one's a closer
- *   call than the others, so add it back in if that's not a distinction
- *   you want to worry about yet. German "r" was NOT treated as a reason
- *   to exclude a word (Bier/Tier/Brief/Arbeit/Fieber/Miete are all kept
- *   in) — flag this if your students need that taught first too, since
- *   excluding r-words as well would cut the list down a lot further.
+ * - "ein", "hier" and "mein" were added to the patternB/patternA word
+ *   banks specifically to support the Production/Spelling/Dictation word
+ *   lists below — they also widen the pool the Listen stage samples from.
+ * - Production and Spelling currently use the identical 6-word list
+ *   (ein, Bein, Tier, Bier, Brief, klein) — same words, heard in Speak
+ *   then spelled in Spell. Give Spelling its own list here if you'd
+ *   rather they not overlap.
+ * - Dictation is NOT marked by the app — students write each word in
+ *   their Homework book and the teacher checks it — so its 6-word list
+ *   isn't filtered for "untaught" German letter sounds the way the
+ *   in-app graded exercises are. Worth noting: "sie" starts with the
+ *   same word-initial s → z sound as "Sie" — harmless since nothing
+ *   here grades spelling, but flag it if that sound hasn't been taught
+ *   yet and you'd rather swap it out.
  * - This word list is a first draft and has not been checked against a
  *   frequency list or the AQA GCSE German vocabulary list — sanity-check
  *   before scaling to more levels.
