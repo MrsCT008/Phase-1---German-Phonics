@@ -2,23 +2,23 @@
  * Contrastive Phonics — core exercise engine (Phase 1)
  *
  * This file knows nothing German-specific — it reads whatever is in
- * LEVELS (data.js) and drives the four-stage loop. Adding levels 2-14
+ * LEVELS (data.js) and drives the five-stage loop. Adding levels 2-14
  * later is a data.js change only.
  *
  * Extension point for later phases: INTERLEAVED REVIEW.
  * Once LEVELS.length > 1, insert a review stage that samples words from
- * previously-completed levels between "production" and "final" of a new
+ * previously-completed levels before the "spelling" stage of a new
  * level. See buildStageList() below for exactly where that slots in.
  */
 
 // ---- Tunable constants -----------------------------------------------
 // How many words per pattern the Listen (discrimination) stage drills.
-// 5+5 = 10 questions, rather than the full 8+8 = 16-word list.
-const DISCRIMINATION_WORDS_PER_PATTERN = 5;
+// 3+3 = 6 questions, sampled from the full patternA/patternB word lists.
+const DISCRIMINATION_WORDS_PER_PATTERN = 3;
 
-// How many words per pattern get a full record-and-compare treatment in
-// the Production stage. Recording is effortful, so we sample rather than
-// drilling all 8+8 words. Raise this once you've tested the loop.
+// Fallback only: used for the Production stage if a level doesn't define
+// an explicit production.words list in data.js. Levels here always
+// specify their own words, so this is just a safety net for future ones.
 const PRODUCTION_WORDS_PER_PATTERN = 3;
 
 // How many times a student can get a single word wrong before the app
@@ -321,18 +321,20 @@ const state = {
   stages: [],
   discrimination: { drill: null },
   production: { queue: [], i: 0 },
-  final: { drill: null },
+  spelling: { drill: null },
   score: 0,
   streak: 0,
   bestStreak: 0
 };
 
+const dictationPlayed = new Set();
+
 function buildStageList() {
   // Extension point: once LEVELS.length > 1, splice an "interleaved
-  // review" stage in here, between "production" and "final", sampling
+  // review" stage in here, between "production" and "spelling", sampling
   // words from levels[0..levelIndex-1]. Left as a single linear list for
   // Phase 1 since there is nothing yet to interleave.
-  return ["intro", "discrimination", "production", "final"];
+  return ["intro", "discrimination", "production", "spelling", "final"];
 }
 
 // Balanced sample: perPattern words from each of patternA/patternB, so a
@@ -342,6 +344,32 @@ function sampleWordList(level, perPattern) {
   const wordsA = sample(level.patternA.words, perPattern).map((w) => ({ word: w, pattern: "A" }));
   const wordsB = sample(level.patternB.words, perPattern).map((w) => ({ word: w, pattern: "B" }));
   return [...wordsA, ...wordsB];
+}
+
+// Production reads its word list straight from data.js (level.production.words)
+// so a teacher can pin the exact words students record. Falls back to a
+// balanced sample if a level doesn't define one.
+function productionWordList(level) {
+  if (level.production && level.production.words && level.production.words.length) {
+    return level.production.words;
+  }
+  const wordsA = sample(level.patternA.words, PRODUCTION_WORDS_PER_PATTERN);
+  const wordsB = sample(level.patternB.words, PRODUCTION_WORDS_PER_PATTERN);
+  return [...wordsA, ...wordsB];
+}
+
+// Same idea for the Spelling stage: an explicit level.spelling.words list,
+// tagged with its A/B pattern (needed for the wrong-answer explanation),
+// falling back to the full word bank if a level doesn't define one.
+function spellingDrillItems(level) {
+  const words =
+    level.spelling && level.spelling.words && level.spelling.words.length
+      ? level.spelling.words
+      : [...level.patternA.words, ...level.patternB.words];
+  return words.map((w) => ({
+    word: w,
+    pattern: level.patternA.words.includes(w) ? "A" : "B"
+  }));
 }
 
 function patternOf(level, key) {
@@ -367,6 +395,7 @@ function renderStageDots() {
     intro: "Rule",
     discrimination: "Listen",
     production: "Speak",
+    spelling: "Spell",
     final: "Dictation"
   };
   state.stages.forEach((s, i) => {
@@ -396,6 +425,7 @@ function renderCurrentStage() {
   if (stage === "intro") renderIntro();
   else if (stage === "discrimination") renderDiscrimination();
   else if (stage === "production") renderProduction();
+  else if (stage === "spelling") renderSpelling();
   else if (stage === "final") renderFinal();
 }
 
@@ -513,9 +543,7 @@ function handleDiscriminationAnswer(choiceBtn, btnRow, chosenPattern, correctPat
 function renderProduction() {
   const level = state.level;
   if (!state.production.queue.length) {
-    const wordsA = sample(level.patternA.words, PRODUCTION_WORDS_PER_PATTERN).map((w) => ({ word: w, pattern: "A" }));
-    const wordsB = sample(level.patternB.words, PRODUCTION_WORDS_PER_PATTERN).map((w) => ({ word: w, pattern: "B" }));
-    state.production.queue = shuffle([...wordsA, ...wordsB]);
+    state.production.queue = shuffle(productionWordList(level).map((w) => ({ word: w })));
     state.production.i = 0;
   }
   const p = state.production;
@@ -526,7 +554,7 @@ function renderProduction() {
     root.appendChild(
       el("div", { class: "card" }, [
         el("h2", {}, "Speaking — done"),
-        el("button", { class: "btn btn-primary", onclick: nextStage }, "Continue to dictation →")
+        el("button", { class: "btn btn-primary", onclick: nextStage }, "Continue to spelling →")
       ])
     );
     return;
@@ -659,35 +687,33 @@ function advanceProduction() {
   renderCurrentStage();
 }
 
-// ---- Stage 4: Final dictation (marked) ------------------------------------
-// Each word is played slowly; the student types what they heard and the
-// app checks it immediately, same drill engine as Listen — missed words
-// repeat at the end, up to the usual 3-attempt cap, then a stars summary.
+// ---- Stage 4: Spelling -----------------------------------------------------
+// Attempts 1 and 2: type the whole word from hearing it.
+// Final attempt (MAX_ATTEMPTS_PER_WORD): the word's own letters are given,
+// shuffled, and the student just puts them in order.
 
-function dictationDrillItems(level) {
-  return level.dictation.words.map((word) => ({
-    word,
-    pattern: level.patternA.words.includes(word) ? "A" : "B"
-  }));
-}
-
-function renderFinal() {
+function renderSpelling() {
   const level = state.level;
-  if (!state.final.drill) {
-    state.final.drill = newDrillState(dictationDrillItems(level));
+  if (!state.spelling.drill) {
+    state.spelling.drill = newDrillState(spellingDrillItems(level));
   }
-  const drill = state.final.drill;
+  const drill = state.spelling.drill;
 
   if (isDrillDone(drill)) {
-    root.appendChild(drillSummaryCard(drill, "Dictation", finishLevel, "Finish level"));
+    root.appendChild(drillSummaryCard(drill, "Spelling", nextStage, "Continue to the dictation →"));
     return;
   }
 
   const item = currentDrillItem(drill);
-  const correctPattern = patternOf(level, item.pattern);
   const attemptNumber = (drill.attempts[drillKey(item)] || 0) + 1;
 
-  const card = el("div", { class: "card" });
+  if (attemptNumber < MAX_ATTEMPTS_PER_WORD) renderSpellingTyping(item, drill, attemptNumber);
+  else renderSpellingArrange(item, drill, attemptNumber);
+}
+
+// ---- shared bits across both spelling attempt-types ------------------------
+
+function appendSpellingHeader(card, drill, attemptNumber) {
   if (drill.idx === 0 && drill.roundNumber > 1) {
     card.appendChild(el("div", { class: "round-banner" }, "Let's try the ones you missed again."));
   }
@@ -699,9 +725,48 @@ function renderFinal() {
         (attemptNumber > 1 ? ` — attempt ${attemptNumber} of ${MAX_ATTEMPTS_PER_WORD}` : "")
     )
   );
-  card.appendChild(el("h2", {}, "Dictation — type what you hear"));
-  card.appendChild(el("p", { class: "muted" }, level.dictation.instructions));
-  card.appendChild(playAudioButton(item.word, "▶ Play slowly", 0.6));
+}
+
+function spellingNextWordButton(drill) {
+  return el(
+    "button",
+    {
+      class: "btn btn-primary",
+      onclick: () => {
+        advanceDrillIndex(drill);
+        renderCurrentStage();
+      }
+    },
+    "Next word →"
+  );
+}
+
+function appendSpellingResultFeedback(feedback, correct, level, item, correctPattern, attemptNumber, drill, pointsIfCorrect) {
+  feedback.innerHTML = "";
+  if (correct) {
+    registerCorrectStreak();
+    awardPoints(pointsIfCorrect);
+    feedback.appendChild(el("p", { class: "feedback-text good" }, pickAffirmation()));
+  } else {
+    registerWrongStreak();
+    feedback.appendChild(el("p", { class: "feedback-text bad" }, explainWrong(level, item, correctPattern)));
+    if (attemptNumber >= MAX_ATTEMPTS_PER_WORD) {
+      feedback.appendChild(el("p", { class: "feedback-text muted" }, "That's three tries on this one — let's move on for now."));
+    }
+  }
+  feedback.appendChild(spellingNextWordButton(drill));
+}
+
+// ---- Attempts 1-2: type the whole word -------------------------------------
+
+function renderSpellingTyping(item, drill, attemptNumber) {
+  const level = state.level;
+  const correctPattern = patternOf(level, item.pattern);
+
+  const card = el("div", { class: "card" });
+  appendSpellingHeader(card, drill, attemptNumber);
+  card.appendChild(el("h2", {}, "Spell it — type the whole word"));
+  card.appendChild(playAudioButton(item.word, "▶ Hear the word"));
 
   const input = el("input", {
     class: "text-input mono",
@@ -712,7 +777,7 @@ function renderFinal() {
     placeholder: "Type the word…"
   });
   const submitBtn = el("button", { class: "btn btn-primary" }, "Check");
-  const feedback = el("div", { class: "feedback", id: "final-feedback" });
+  const feedback = el("div", { class: "feedback", id: "spelling-feedback" });
 
   function submit() {
     if (submitBtn.disabled) return;
@@ -720,32 +785,7 @@ function renderFinal() {
     input.disabled = true;
     const correct = input.value.trim().toLowerCase() === item.word.toLowerCase();
     const attemptNum = recordDrillAnswer(drill, item, correct);
-
-    feedback.innerHTML = "";
-    if (correct) {
-      registerCorrectStreak();
-      awardPoints(attemptNum === 1 ? 10 : 5);
-      feedback.appendChild(el("p", { class: "feedback-text good" }, pickAffirmation()));
-    } else {
-      registerWrongStreak();
-      feedback.appendChild(el("p", { class: "feedback-text bad" }, explainWrong(level, item, correctPattern)));
-      if (attemptNum >= MAX_ATTEMPTS_PER_WORD) {
-        feedback.appendChild(el("p", { class: "feedback-text muted" }, "That's three tries on this one — let's move on for now."));
-      }
-    }
-    feedback.appendChild(
-      el(
-        "button",
-        {
-          class: "btn btn-primary",
-          onclick: () => {
-            advanceDrillIndex(drill);
-            renderCurrentStage();
-          }
-        },
-        "Next word →"
-      )
-    );
+    appendSpellingResultFeedback(feedback, correct, level, item, correctPattern, attemptNum, drill, attemptNum === 1 ? 10 : 5);
   }
 
   submitBtn.addEventListener("click", submit);
@@ -760,11 +800,155 @@ function renderFinal() {
   input.focus();
 }
 
+// ---- Final attempt: letters given, put them in order -----------------------
+
+function shuffledLetters(word) {
+  const letters = Array.from(word).map((ch, i) => ({ ch, id: i }));
+  if (letters.length <= 1) return letters;
+  let attempt;
+  do {
+    attempt = shuffle(letters);
+  } while (attempt.map((t) => t.ch).join("") === word);
+  return attempt;
+}
+
+function renderSpellingArrange(item, drill, attemptNumber) {
+  const level = state.level;
+  const correctPattern = patternOf(level, item.pattern);
+
+  const card = el("div", { class: "card" });
+  appendSpellingHeader(card, drill, attemptNumber);
+  card.appendChild(el("h2", {}, "Spell it — put the letters in order"));
+  card.appendChild(el("p", { class: "muted" }, "Here are the letters, out of order. Tap them into place; tap a placed letter to take it back out."));
+  card.appendChild(playAudioButton(item.word, "▶ Hear the word"));
+
+  const tiles = shuffledLetters(item.word); // [{ ch, id }]
+  const tileChar = (id) => tiles.find((t) => t.id === id).ch;
+  let bank = tiles.map((t) => t.id);
+  let answer = [];
+  let checked = false;
+
+  const answerRow = el("div", { class: "arrange-answer" });
+  const bankRow = el("div", { class: "arrange-bank" });
+  const controls = el("div", { class: "arrange-controls" });
+  const feedback = el("div", { class: "feedback", id: "spelling-feedback" });
+
+  function redraw() {
+    answerRow.innerHTML = "";
+    answer.forEach((id) => {
+      const attrs = { class: "btn tile tile-answer mono" };
+      if (checked) attrs.disabled = "true";
+      const tileBtn = el("button", attrs, tileChar(id));
+      if (!checked) {
+        tileBtn.addEventListener("click", () => {
+          answer = answer.filter((a) => a !== id);
+          bank.push(id);
+          redraw();
+        });
+      }
+      answerRow.appendChild(tileBtn);
+    });
+    for (let i = answer.length; i < tiles.length; i++) {
+      answerRow.appendChild(el("div", { class: "tile tile-empty" }, ""));
+    }
+
+    bankRow.innerHTML = "";
+    if (!checked) {
+      bank.forEach((id) => {
+        const tileBtn = el("button", { class: "btn tile tile-bank mono" }, tileChar(id));
+        tileBtn.addEventListener("click", () => {
+          bank = bank.filter((b) => b !== id);
+          answer.push(id);
+          redraw();
+          if (answer.length === tiles.length) submit();
+        });
+        bankRow.appendChild(tileBtn);
+      });
+    }
+
+    controls.innerHTML = "";
+    if (answer.length > 0 && !checked) {
+      controls.appendChild(
+        el(
+          "button",
+          {
+            class: "btn btn-secondary",
+            onclick: () => {
+              answer = [];
+              bank = tiles.map((t) => t.id);
+              redraw();
+            }
+          },
+          "Clear"
+        )
+      );
+    }
+  }
+
+  function submit() {
+    checked = true;
+    redraw();
+    const correct = answer.map(tileChar).join("") === item.word;
+    recordDrillAnswer(drill, item, correct);
+    appendSpellingResultFeedback(feedback, correct, level, item, correctPattern, attemptNumber, drill, 5);
+  }
+
+  card.appendChild(answerRow);
+  card.appendChild(bankRow);
+  card.appendChild(controls);
+  card.appendChild(feedback);
+
+  root.appendChild(card);
+  redraw();
+}
+
+// ---- Stage 5: Final dictation (not graded) --------------------------------
+// Each word can be played individually, and slowly, as many times as
+// needed. The app doesn't check spelling here — the student writes each
+// word in their homework book and the teacher marks it.
+
+function renderFinal() {
+  const level = state.level;
+  const dictation = level.dictation;
+
+  const card = el("div", { class: "card" }, [
+    el("h2", {}, "Final dictation"),
+    el("p", {}, dictation.instructions)
+  ]);
+
+  const list = el("div", { class: "dictation-list" });
+  dictation.words.forEach((word, i) => {
+    const row = el("div", { class: "dictation-row" + (dictationPlayed.has(word) ? " played" : "") });
+    row.appendChild(el("div", { class: "dictation-number" }, `${i + 1}.`));
+    const btn = playAudioButton(word, "▶ Play slowly", 0.6);
+    btn.addEventListener("click", () => {
+      if (!dictationPlayed.has(word)) {
+        dictationPlayed.add(word);
+        awardPoints(5);
+      }
+      row.classList.add("played");
+    });
+    row.appendChild(btn);
+    list.appendChild(row);
+  });
+  card.appendChild(list);
+
+  card.appendChild(
+    el("div", { class: "sentence-note" }, "The app doesn't mark this one — your teacher will check your Homework book.")
+  );
+
+  card.appendChild(
+    el("button", { class: "btn btn-primary", onclick: () => finishLevel() }, "I've written them down — finish level")
+  );
+
+  root.appendChild(card);
+}
+
 function finishLevel() {
   const level = state.level;
   const missed = [
     ...(state.discrimination.drill ? state.discrimination.drill.movedOn : []),
-    ...(state.final.drill ? state.final.drill.movedOn : [])
+    ...(state.spelling.drill ? state.spelling.drill.movedOn : [])
   ];
   const uniqueMissed = [...new Set(missed.map((m) => m.word))];
 
@@ -774,6 +958,13 @@ function finishLevel() {
       el("h2", {}, "Level complete"),
       el("p", {}, `"${level.patternA.grapheme}" vs "${level.patternB.grapheme}" — all ${state.stages.length} stages done.`),
       el("p", { class: "stars" }, `★ ${state.score} points   —   best streak 🔥 ${state.bestStreak}`),
+      el(
+        "p",
+        { class: "muted" },
+        dictationPlayed.size
+          ? `Played ${dictationPlayed.size} / ${level.dictation.words.length} dictation words — go write them up.`
+          : "Note: none of the dictation words were played."
+      ),
       uniqueMissed.length
         ? el("p", { class: "muted" }, "Words to revisit next time: " + uniqueMissed.join(", "))
         : null,
@@ -786,10 +977,11 @@ function restart() {
   state.stageIndex = 0;
   state.discrimination = { drill: null };
   state.production = { queue: [], i: 0 };
-  state.final = { drill: null };
+  state.spelling = { drill: null };
   state.score = 0;
   state.streak = 0;
   state.bestStreak = 0;
+  dictationPlayed.clear();
   Recorder.discardUrl();
   Recorder.releaseMic();
   renderScoreboard();
