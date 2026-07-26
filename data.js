@@ -21,22 +21,22 @@ const LEVELS = [
     title: '"ie" vs "ei"',
     patternA: {
       grapheme: "ie",
-      ipa: "iː",
+      soundHint: "long ee", // plain-English description, no IPA notation
       label: "long ee, like English 'see'",
       exampleWord: "Liebe",
       words: ["Liebe", "Bier", "Fieber", "Tier", "viel", "Brief", "Miete", "Sie"]
     },
     patternB: {
       grapheme: "ei",
-      ipa: "aɪ",
+      soundHint: "eye",
       label: "like English 'eye'",
       exampleWord: "Bein",
       words: ["Bein", "klein", "Arbeit", "Wein", "Kleid", "Eis", "Reise", "Weise"]
     },
     mnemonic: "When i and e go walking, the last one does the talking.",
-    sentence: {
-      text: "Mein lieber Freund schreibt mir einen Brief aus Wien.",
-      translation: "My dear friend writes me a letter from Vienna."
+    dictation: {
+      instructions: "Listen to each word — it's read slowly. Write it in your exercise book.",
+      words: ["Brief", "Arbeit", "Tier", "Kleid", "Miete"]
     }
   }
 ];
@@ -46,8 +46,10 @@ const LEVELS = [
  * - "viel" and "Sie" are the shortest ie-words; short items make good
  *   discrimination/encode items but are less interesting to record aloud
  *   — kept in for now, revisit if Production stage drags for these two.
- * - "Wien" appears only in the capstone sentence, not in either word
- *   bank, since it's a proper noun (city name) rather than a drill word.
+ * - Dictation list (3 "ie" + 2 "ei") replaces the earlier capstone
+ *   sentence — pulled from the existing word banks rather than new
+ *   vocabulary, so nothing here is a word students haven't already met
+ *   in this level. First draft — swap words if you want a different mix.
  * - This word list is a first draft and has not been checked against a
  *   frequency list or the AQA GCSE German vocabulary list — sanity-check
  *   before scaling to more levels.
