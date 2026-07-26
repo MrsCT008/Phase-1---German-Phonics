@@ -17,7 +17,11 @@
 // drilling all 8+8 words. Raise this once you've tested the loop.
 const PRODUCTION_WORDS_PER_PATTERN = 3;
 
-// ---- Small utilities ---------------------------------------------------
+// How many times a student can get a single word wrong before the app
+// lets them move on without mastering it (still logged for the summary).
+const MAX_ATTEMPTS_PER_WORD = 3;
+
+// ---- Small utilities -----------------------------------------------------
 
 function shuffle(arr) {
   const a = arr.slice();
@@ -47,7 +51,7 @@ function el(tag, attrs = {}, children = []) {
   return node;
 }
 
-// ---- Text-to-speech ------------------------------------------------------
+// ---- Text-to-speech --------------------------------------------------------
 
 const TTS = {
   voice: null,
@@ -57,8 +61,6 @@ const TTS = {
     if (!this.supported) return;
     const voices = speechSynthesis.getVoices();
     if (!voices.length) return;
-    // Prefer an explicitly German voice; fall back to any voice whose
-    // lang starts with "de".
     this.voice =
       voices.find((v) => v.lang && v.lang.toLowerCase() === "de-de") ||
       voices.find((v) => v.lang && v.lang.toLowerCase().startsWith("de")) ||
@@ -66,7 +68,7 @@ const TTS = {
     this.ready = true;
     document.dispatchEvent(new CustomEvent("tts-ready"));
   },
-  speak(text) {
+  speak(text, rate) {
     if (!this.supported) return false;
     speechSynthesis.cancel(); // avoid queueing pile-ups on rapid taps
     const utter = new SpeechSynthesisUtterance(text);
@@ -76,7 +78,7 @@ const TTS = {
     } else {
       utter.lang = "de-DE"; // best-effort even with no German voice installed
     }
-    utter.rate = 0.95;
+    utter.rate = rate || 0.95;
     speechSynthesis.speak(utter);
     return true;
   }
@@ -87,19 +89,15 @@ if (TTS.supported) {
   speechSynthesis.addEventListener("voiceschanged", () => TTS.loadVoices());
 }
 
-function playAudioButton(text, label = "▶ Play") {
+function playAudioButton(text, label = "▶ Play", rate) {
   const btn = el("button", { class: "btn btn-audio" }, label);
   btn.addEventListener("click", () => {
     if (!TTS.supported) {
       flashUnsupported(btn);
       return;
     }
-    if (!TTS.voice) {
-      // Still attempt playback with the browser default voice — many
-      // browsers will fall back reasonably — but warn once.
-      warnNoGermanVoice();
-    }
-    TTS.speak(text);
+    if (!TTS.voice) warnNoGermanVoice();
+    TTS.speak(text, rate);
   });
   return btn;
 }
@@ -119,11 +117,16 @@ function flashUnsupported(btn) {
   btn.disabled = true;
 }
 
-// ---- Recording -----------------------------------------------------------
+// ---- Recording -------------------------------------------------------------
+// Fixed design: start() only starts the recorder and returns immediately.
+// stopAndGetUrl() is a separate call, triggered by the Stop button, that
+// resolves once the 'stop' event has actually fired. Earlier versions
+// awaited the stop event from inside start() itself, which meant the Stop
+// button's click handler wasn't attached until after start() had already
+// finished — a deadlock, since nothing could ever fire 'stop'.
 
 const Recorder = {
   supported: !!(navigator.mediaDevices && window.MediaRecorder),
-  permissionState: "unknown", // unknown | granted | denied
   stream: null,
   recorder: null,
   chunks: [],
@@ -132,7 +135,6 @@ const Recorder = {
   async ensureStream() {
     if (this.stream) return this.stream;
     this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    this.permissionState = "granted";
     return this.stream;
   },
 
@@ -143,31 +145,32 @@ const Recorder = {
     this.recorder.addEventListener("dataavailable", (e) => {
       if (e.data.size > 0) this.chunks.push(e.data);
     });
-    const stopped = new Promise((resolve) => {
-      this.recorder.addEventListener("stop", resolve, { once: true });
-    });
     this.recorder.start();
-    return stopped;
   },
 
-  stop() {
-    if (this.recorder && this.recorder.state !== "inactive") {
+  stopAndGetUrl() {
+    return new Promise((resolve) => {
+      if (!this.recorder || this.recorder.state === "inactive") {
+        resolve(null);
+        return;
+      }
+      this.recorder.addEventListener(
+        "stop",
+        () => {
+          const blob = new Blob(this.chunks, { type: "audio/webm" });
+          this.discardUrl();
+          this.currentUrl = URL.createObjectURL(blob);
+          resolve(this.currentUrl);
+        },
+        { once: true }
+      );
       this.recorder.stop();
-    }
-  },
-
-  finish() {
-    // Call after the 'stop' event has fired (i.e. after the promise from
-    // start() resolves) to get the recorded blob.
-    const blob = new Blob(this.chunks, { type: "audio/webm" });
-    this.discardUrl();
-    this.currentUrl = URL.createObjectURL(blob);
-    return this.currentUrl;
+    });
   },
 
   discardUrl() {
-    // Explicitly free the previous recording — nothing is persisted
-    // beyond the current word, per the no-storage requirement.
+    // Nothing is persisted beyond the current word, per the no-storage
+    // requirement — every previous recording is explicitly freed.
     if (this.currentUrl) {
       URL.revokeObjectURL(this.currentUrl);
       this.currentUrl = null;
@@ -182,16 +185,145 @@ const Recorder = {
   }
 };
 
+// ---- Gamification (lightweight, in-session only — nothing persisted) -----
+
+const AFFIRMATIONS = ["Correct!", "Nice one!", "Got it!", "Well done!", "Spot on!", "Exactly right!"];
+function pickAffirmation() {
+  return AFFIRMATIONS[Math.floor(Math.random() * AFFIRMATIONS.length)];
+}
+
+function renderScoreboard() {
+  const bar = document.getElementById("scoreboard");
+  if (!bar) return;
+  bar.textContent =
+    `★ ${state.score} pts` + (state.streak >= 2 ? `   🔥 ${state.streak} in a row` : "");
+}
+
+function awardPoints(n) {
+  state.score += n;
+  renderScoreboard();
+}
+
+function registerCorrectStreak() {
+  state.streak++;
+  if (state.streak > state.bestStreak) state.bestStreak = state.streak;
+  renderScoreboard();
+}
+
+function registerWrongStreak() {
+  state.streak = 0;
+  renderScoreboard();
+}
+
+function starsFor(ratio) {
+  if (ratio >= 0.9) return 3;
+  if (ratio >= 0.7) return 2;
+  if (ratio >= 0.4) return 1;
+  return 0;
+}
+
+// ---- Drill queue (discrimination + encode share this) ---------------------
+// A "drill" runs the word list once, then automatically loops any wrong
+// answers back in as a second (or third) round, so mistakes get repeated
+// before the stage ends. A word that's wrong MAX_ATTEMPTS_PER_WORD times
+// is let through without being mastered, so nobody gets stuck.
+
+function newDrillState(items) {
+  return {
+    round: shuffle(items),
+    idx: 0,
+    attempts: {},
+    firstPassCorrect: 0,
+    totalWords: items.length,
+    movedOn: [],
+    nextRound: [],
+    roundNumber: 1
+  };
+}
+
+function drillKey(item) {
+  return item.pattern + ":" + item.word;
+}
+
+function currentDrillItem(drill) {
+  return drill.round[drill.idx];
+}
+
+function isDrillDone(drill) {
+  return drill.idx >= drill.round.length && drill.nextRound.length === 0;
+}
+
+// Records the answer's outcome and returns the attempt number (1-based)
+// for THIS word. Called once, immediately when the student answers.
+function recordDrillAnswer(drill, item, wasCorrect) {
+  const key = drillKey(item);
+  const attemptNumber = (drill.attempts[key] || 0) + 1;
+  drill.attempts[key] = attemptNumber;
+
+  if (wasCorrect) {
+    if (attemptNumber === 1) drill.firstPassCorrect++;
+  } else if (attemptNumber >= MAX_ATTEMPTS_PER_WORD) {
+    drill.movedOn.push(item);
+  } else {
+    drill.nextRound.push(item);
+  }
+  return attemptNumber;
+}
+
+// Moves to the next word, rolling missed words into a new round once the
+// current one is exhausted. Called when the student taps "Next word".
+function advanceDrillIndex(drill) {
+  drill.idx++;
+  if (drill.idx >= drill.round.length && drill.nextRound.length > 0) {
+    drill.round = shuffle(drill.nextRound);
+    drill.nextRound = [];
+    drill.idx = 0;
+    drill.roundNumber++;
+  }
+}
+
+function drillSummaryCard(drill, label, onContinue, continueLabel) {
+  const stars = starsFor(drill.totalWords ? drill.firstPassCorrect / drill.totalWords : 0);
+  const card = el("div", { class: "card" }, [
+    el("h2", {}, `${label} — done`),
+    el("div", { class: "stars" }, "★".repeat(stars) + "☆".repeat(3 - stars)),
+    el("p", {}, `${drill.firstPassCorrect} / ${drill.totalWords} correct on the first try.`)
+  ]);
+  if (drill.movedOn.length) {
+    card.appendChild(
+      el(
+        "p",
+        { class: "muted" },
+        "Needs more practice next time: " + drill.movedOn.map((w) => w.word).join(", ")
+      )
+    );
+  }
+  card.appendChild(el("button", { class: "btn btn-primary", onclick: onContinue }, continueLabel));
+  return card;
+}
+
+// Builds the kid-friendly explanation shown after a wrong answer, e.g.
+// "When i and e go walking, the last one does the talking. The correct
+// word was Arbeit. This word has the eye sound, so it needs the spelling ei."
+function explainWrong(level, item, correctPattern) {
+  return `${level.mnemonic} The correct word was "${item.word}". This word has the ${correctPattern.soundHint} sound, so it needs the spelling "${correctPattern.grapheme}".`;
+}
+
 // ---- Engine state ----------------------------------------------------
 
 const state = {
   level: LEVELS[0],
   stageIndex: 0,
   stages: [],
-  discrimination: { queue: [], i: 0, correct: 0, awaitingRetry: false },
+  discrimination: { drill: null },
   production: { queue: [], i: 0 },
-  encode: { queue: [], i: 0, correct: 0 }
+  encode: { drill: null },
+  score: 0,
+  streak: 0,
+  bestStreak: 0
 };
+
+const dictationPlayed = new Set();
 
 function buildStageList() {
   // Extension point: once LEVELS.length > 1, splice an "interleaved
@@ -215,6 +347,7 @@ function patternOf(level, key) {
 function init() {
   state.stages = buildStageList();
   state.stageIndex = 0;
+  renderScoreboard();
   renderStageDots();
   renderCurrentStage();
 }
@@ -231,7 +364,7 @@ function renderStageDots() {
     discrimination: "Listen",
     production: "Speak",
     encode: "Spell",
-    final: "Sentence"
+    final: "Dictation"
   };
   state.stages.forEach((s, i) => {
     const dot = el(
@@ -284,7 +417,7 @@ function renderIntro() {
 function renderPatternExample(pattern) {
   return el("div", { class: "pattern-example" }, [
     el("div", { class: "grapheme" }, `"${pattern.grapheme}"`),
-    el("div", { class: "ipa" }, `/${pattern.ipa}/ — ${pattern.label}`),
+    el("div", { class: "sound-label" }, pattern.label),
     el("div", { class: "example-word" }, pattern.exampleWord),
     playAudioButton(pattern.exampleWord, "▶ Hear " + pattern.exampleWord)
   ]);
@@ -294,80 +427,83 @@ function renderPatternExample(pattern) {
 
 function renderDiscrimination() {
   const level = state.level;
-  if (!state.discrimination.queue.length) {
-    state.discrimination.queue = shuffle(wordList(level));
-    state.discrimination.i = 0;
-    state.discrimination.correct = 0;
+  if (!state.discrimination.drill) {
+    state.discrimination.drill = newDrillState(wordList(level));
   }
-  const d = state.discrimination;
+  const drill = state.discrimination.drill;
 
-  if (d.i >= d.queue.length) {
-    root.appendChild(
-      el("div", { class: "card" }, [
-        el("h2", {}, "Listening — done"),
-        el("p", {}, `${d.correct} / ${d.queue.length} correct on the first try.`),
-        el("button", { class: "btn btn-primary", onclick: nextStage }, "Continue to speaking →")
-      ])
-    );
+  if (isDrillDone(drill)) {
+    root.appendChild(drillSummaryCard(drill, "Listening", nextStage, "Continue to speaking →"));
     return;
   }
 
-  const item = d.queue[d.i];
+  const item = currentDrillItem(drill);
   const pattern = patternOf(level, item.pattern);
   const otherPattern = item.pattern === "A" ? level.patternB : level.patternA;
   const buttons = shuffle([pattern, otherPattern]); // randomise button position each attempt
+  const attemptNumber = (drill.attempts[drillKey(item)] || 0) + 1;
 
-  const card = el("div", { class: "card" }, [
-    el("div", { class: "progress-line" }, `Word ${d.i + 1} of ${d.queue.length}`),
-    el("h2", {}, "Which spelling did you hear?"),
-    playAudioButton(item.word, "▶ Play word")
-  ]);
+  const card = el("div", { class: "card" });
+  if (drill.idx === 0 && drill.roundNumber > 1) {
+    card.appendChild(el("div", { class: "round-banner" }, "Let's try the ones you missed again."));
+  }
+  card.appendChild(
+    el(
+      "div",
+      { class: "progress-line" },
+      `Word ${drill.idx + 1} of ${drill.round.length}` +
+        (attemptNumber > 1 ? ` — attempt ${attemptNumber} of ${MAX_ATTEMPTS_PER_WORD}` : "")
+    )
+  );
+  card.appendChild(el("h2", {}, "Which spelling did you hear?"));
+  card.appendChild(playAudioButton(item.word, "▶ Play word"));
 
   const btnRow = el("div", { class: "choice-row" });
   buttons.forEach((p) => {
-    const choice = el(
-      "button",
-      { class: "btn btn-choice" },
-      `"${p.grapheme}"  /${p.ipa}/`
-    );
-    choice.addEventListener("click", () => handleDiscriminationAnswer(choice, btnRow, p, pattern, item));
+    const choice = el("button", { class: "btn btn-choice" }, `"${p.grapheme}" — ${p.soundHint} sound`);
+    choice.addEventListener("click", () => handleDiscriminationAnswer(choice, btnRow, p, pattern, item, drill));
     btnRow.appendChild(choice);
   });
   card.appendChild(btnRow);
-
-  const feedback = el("div", { class: "feedback", id: "disc-feedback" });
-  card.appendChild(feedback);
+  card.appendChild(el("div", { class: "feedback", id: "disc-feedback" }));
 
   root.appendChild(card);
 }
 
-function handleDiscriminationAnswer(choiceBtn, btnRow, chosenPattern, correctPattern, item) {
-  const d = state.discrimination;
+function handleDiscriminationAnswer(choiceBtn, btnRow, chosenPattern, correctPattern, item, drill) {
   const feedback = document.getElementById("disc-feedback");
   [...btnRow.children].forEach((b) => (b.disabled = true));
+  const correct = chosenPattern.grapheme === correctPattern.grapheme;
+  const attemptNumber = recordDrillAnswer(drill, item, correct);
 
-  if (chosenPattern.grapheme === correctPattern.grapheme) {
+  feedback.innerHTML = "";
+  if (correct) {
     choiceBtn.classList.add("correct");
-    d.correct++;
-    feedback.innerHTML = "";
-    feedback.appendChild(el("p", { class: "feedback-text good" }, "Correct."));
-    const goBtn = el("button", { class: "btn btn-primary", onclick: () => advanceDiscrimination() }, "Next word →");
-    feedback.appendChild(goBtn);
+    registerCorrectStreak();
+    awardPoints(attemptNumber === 1 ? 10 : 5);
+    feedback.appendChild(el("p", { class: "feedback-text good" }, pickAffirmation()));
   } else {
     choiceBtn.classList.add("wrong");
-    feedback.innerHTML = "";
-    feedback.appendChild(
-      el("p", { class: "feedback-text bad" }, `Not quite — that was "${item.word}" (${correctPattern.grapheme}).`)
-    );
+    registerWrongStreak();
+    feedback.appendChild(el("p", { class: "feedback-text bad" }, explainWrong(state.level, item, correctPattern)));
     feedback.appendChild(playAudioButton(item.word, "▶ Hear it again"));
-    const goBtn = el("button", { class: "btn btn-primary", onclick: () => advanceDiscrimination() }, "Next word →");
-    feedback.appendChild(goBtn);
+    if (attemptNumber >= MAX_ATTEMPTS_PER_WORD) {
+      feedback.appendChild(el("p", { class: "feedback-text muted" }, "That's three tries on this one — let's move on for now."));
+    }
   }
-}
 
-function advanceDiscrimination() {
-  state.discrimination.i++;
-  renderCurrentStage();
+  const goBtn = el(
+    "button",
+    {
+      class: "btn btn-primary",
+      onclick: () => {
+        advanceDrillIndex(drill);
+        renderCurrentStage();
+      }
+    },
+    "Next word →"
+  );
+  feedback.appendChild(goBtn);
 }
 
 // ---- Stage 3: Production -------------------------------------------------
@@ -417,48 +553,59 @@ function renderProduction() {
   const playbackRow = el("div", { class: "playback-row" });
 
   let recording = false;
+  let awardedThisWord = false;
 
   recordBtn.addEventListener("click", async () => {
     if (recording) return;
     recording = true;
     recordBtn.disabled = true;
     status.textContent = "Recording… tap stop when done.";
+    playbackRow.innerHTML = ""; // clear any previous take while re-recording
+
     const stopBtn = el("button", { class: "btn btn-record-stop" }, "■ Stop");
     recordArea.appendChild(stopBtn);
 
-    let stoppedPromise;
     try {
-      stoppedPromise = await Recorder.start();
+      await Recorder.start();
     } catch (err) {
-      Recorder.permissionState = "denied";
       status.textContent = "Microphone access was denied or unavailable. You can still hear the model version below.";
       stopBtn.remove();
       recordBtn.remove();
       card.appendChild(playAudioButton(item.word, "▶ Hear the model version"));
       card.appendChild(el("button", { class: "btn btn-primary", onclick: () => advanceProduction() }, "Next word →"));
+      recording = false;
       return;
     }
 
     stopBtn.addEventListener(
       "click",
-      () => {
-        Recorder.stop();
+      async () => {
+        stopBtn.disabled = true;
+        status.textContent = "Processing…";
+        const url = await Recorder.stopAndGetUrl();
+        stopBtn.remove();
+
+        if (!url) {
+          status.textContent = "Something went wrong with that recording — try again.";
+        } else {
+          status.textContent = "Got it — compare below.";
+          playbackRow.innerHTML = "";
+          playbackRow.appendChild(el("div", { class: "playback-label" }, "Your recording:"));
+          playbackRow.appendChild(el("audio", { controls: "true", src: url }));
+          playbackRow.appendChild(el("div", { class: "playback-label" }, "Model version:"));
+          playbackRow.appendChild(playAudioButton(item.word, "▶ Play model version"));
+          if (!awardedThisWord) {
+            awardedThisWord = true;
+            awardPoints(5);
+          }
+        }
+
+        recordBtn.textContent = "● Record again";
+        recordBtn.disabled = false;
+        recording = false;
       },
       { once: true }
     );
-
-    await stoppedPromise;
-    stopBtn.remove();
-    const url = Recorder.finish();
-    status.textContent = "Got it — compare below.";
-    playbackRow.innerHTML = "";
-    playbackRow.appendChild(el("div", { class: "playback-label" }, "Your recording:"));
-    playbackRow.appendChild(el("audio", { controls: "true", src: url }));
-    playbackRow.appendChild(el("div", { class: "playback-label" }, "Model version:"));
-    playbackRow.appendChild(playAudioButton(item.word, "▶ Play model version"));
-    recordBtn.textContent = "● Record again";
-    recordBtn.disabled = false;
-    recording = false;
   });
 
   recordArea.appendChild(recordBtn);
@@ -489,45 +636,43 @@ function gapWord(word, grapheme) {
 
 function renderEncode() {
   const level = state.level;
-  if (!state.encode.queue.length) {
-    state.encode.queue = shuffle(wordList(level));
-    state.encode.i = 0;
-    state.encode.correct = 0;
+  if (!state.encode.drill) {
+    state.encode.drill = newDrillState(wordList(level));
   }
-  const e = state.encode;
+  const drill = state.encode.drill;
 
-  if (e.i >= e.queue.length) {
-    root.appendChild(
-      el("div", { class: "card" }, [
-        el("h2", {}, "Spelling — done"),
-        el("p", {}, `${e.correct} / ${e.queue.length} correct on the first try.`),
-        el("button", { class: "btn btn-primary", onclick: nextStage }, "Continue to the final sentence →")
-      ])
-    );
+  if (isDrillDone(drill)) {
+    root.appendChild(drillSummaryCard(drill, "Spelling", nextStage, "Continue to the final dictation →"));
     return;
   }
 
-  const item = e.queue[e.i];
+  const item = currentDrillItem(drill);
   const correctPattern = patternOf(level, item.pattern);
   const otherPattern = item.pattern === "A" ? level.patternB : level.patternA;
   const gap = gapWord(item.word, correctPattern.grapheme);
   const buttons = shuffle([correctPattern, otherPattern]);
+  const attemptNumber = (drill.attempts[drillKey(item)] || 0) + 1;
 
-  const card = el("div", { class: "card" }, [
-    el("div", { class: "progress-line" }, `Word ${e.i + 1} of ${e.queue.length}`),
-    el("h2", {}, "Fill the gap"),
-    el("div", { class: "gap-word" }, [
-      gap.before,
-      el("span", { class: "gap-blank" }, "___"),
-      gap.after
-    ]),
-    playAudioButton(item.word, "▶ Hear the word")
-  ]);
+  const card = el("div", { class: "card" });
+  if (drill.idx === 0 && drill.roundNumber > 1) {
+    card.appendChild(el("div", { class: "round-banner" }, "Let's try the ones you missed again."));
+  }
+  card.appendChild(
+    el(
+      "div",
+      { class: "progress-line" },
+      `Word ${drill.idx + 1} of ${drill.round.length}` +
+        (attemptNumber > 1 ? ` — attempt ${attemptNumber} of ${MAX_ATTEMPTS_PER_WORD}` : "")
+    )
+  );
+  card.appendChild(el("h2", {}, "Fill the gap"));
+  card.appendChild(el("div", { class: "gap-word" }, [gap.before, el("span", { class: "gap-blank" }, "___"), gap.after]));
+  card.appendChild(playAudioButton(item.word, "▶ Hear the word"));
 
   const btnRow = el("div", { class: "choice-row" });
   buttons.forEach((p) => {
     const choice = el("button", { class: "btn btn-choice mono" }, `"${p.grapheme}"`);
-    choice.addEventListener("click", () => handleEncodeAnswer(choice, btnRow, p, correctPattern, item));
+    choice.addEventListener("click", () => handleEncodeAnswer(choice, btnRow, p, correctPattern, item, drill));
     btnRow.appendChild(choice);
   });
   card.appendChild(btnRow);
@@ -536,84 +681,107 @@ function renderEncode() {
   root.appendChild(card);
 }
 
-function handleEncodeAnswer(choiceBtn, btnRow, chosenPattern, correctPattern, item) {
-  const e = state.encode;
+function handleEncodeAnswer(choiceBtn, btnRow, chosenPattern, correctPattern, item, drill) {
   const feedback = document.getElementById("encode-feedback");
   [...btnRow.children].forEach((b) => (b.disabled = true));
+  const correct = chosenPattern.grapheme === correctPattern.grapheme;
+  const attemptNumber = recordDrillAnswer(drill, item, correct);
 
-  if (chosenPattern.grapheme === correctPattern.grapheme) {
+  feedback.innerHTML = "";
+  if (correct) {
     choiceBtn.classList.add("correct");
-    e.correct++;
-    feedback.innerHTML = "";
-    feedback.appendChild(el("p", { class: "feedback-text good" }, `Correct — ${item.word}.`));
+    registerCorrectStreak();
+    awardPoints(attemptNumber === 1 ? 10 : 5);
+    feedback.appendChild(el("p", { class: "feedback-text good" }, pickAffirmation()));
   } else {
     choiceBtn.classList.add("wrong");
-    feedback.innerHTML = "";
-    feedback.appendChild(el("p", { class: "feedback-text bad" }, `The word is ${item.word} (${correctPattern.grapheme}).`));
+    registerWrongStreak();
+    feedback.appendChild(el("p", { class: "feedback-text bad" }, explainWrong(state.level, item, correctPattern)));
+    if (attemptNumber >= MAX_ATTEMPTS_PER_WORD) {
+      feedback.appendChild(el("p", { class: "feedback-text muted" }, "That's three tries on this one — let's move on for now."));
+    }
   }
-  feedback.appendChild(el("button", { class: "btn btn-primary", onclick: () => advanceEncode() }, "Next word →"));
+
+  const goBtn = el(
+    "button",
+    {
+      class: "btn btn-primary",
+      onclick: () => {
+        advanceDrillIndex(drill);
+        renderCurrentStage();
+      }
+    },
+    "Next word →"
+  );
+  feedback.appendChild(goBtn);
 }
 
-function advanceEncode() {
-  state.encode.i++;
-  renderCurrentStage();
-}
-
-// ---- Stage 5: Final sentence (not graded) --------------------------------
-
-let sentencePlayed = false;
-let sentencePlayCount = 0;
+// ---- Stage 5: Final dictation (not graded) --------------------------------
+// Five words, played one at a time, slowly, for students to write in
+// their exercise book. The app never marks this — a teacher checks the
+// book — it just tracks (in-session only) which words were played.
 
 function renderFinal() {
   const level = state.level;
+  const dictation = level.dictation;
+
   const card = el("div", { class: "card" }, [
-    el("h2", {}, "Final sentence"),
-    el("p", {}, "Listen, then write this sentence in your exercise book."),
-    playAudioButtonWithLog(level.sentence.text),
-    el("div", { class: "sentence-note" }, "The app doesn't mark this one — your teacher will check your exercise book.")
+    el("h2", {}, "Final dictation"),
+    el("p", {}, dictation.instructions)
   ]);
 
-  const log = el("div", { class: "play-log", id: "sentence-log" }, sentenceLogText());
-  card.appendChild(log);
+  const list = el("div", { class: "dictation-list" });
+  dictation.words.forEach((word, i) => {
+    const row = el("div", { class: "dictation-row" + (dictationPlayed.has(word) ? " played" : "") });
+    row.appendChild(el("div", { class: "dictation-number" }, `${i + 1}.`));
+    const btn = playAudioButton(word, "▶ Play slowly", 0.6);
+    btn.addEventListener("click", () => {
+      if (!dictationPlayed.has(word)) {
+        dictationPlayed.add(word);
+        awardPoints(5);
+      }
+      row.classList.add("played");
+    });
+    row.appendChild(btn);
+    list.appendChild(row);
+  });
+  card.appendChild(list);
 
   card.appendChild(
-    el(
-      "button",
-      { class: "btn btn-primary", onclick: () => finishLevel() },
-      "I've written it down — finish level"
-    )
+    el("div", { class: "sentence-note" }, "The app doesn't mark this one — your teacher will check your exercise book.")
+  );
+
+  card.appendChild(
+    el("button", { class: "btn btn-primary", onclick: () => finishLevel() }, "I've written them down — finish level")
   );
 
   root.appendChild(card);
 }
 
-function sentenceLogText() {
-  if (sentencePlayCount === 0) return "Not played yet.";
-  return `Played ${sentencePlayCount} time${sentencePlayCount === 1 ? "" : "s"} this session.`;
-}
-
-function playAudioButtonWithLog(text) {
-  const btn = playAudioButton(text, "▶ Play sentence");
-  btn.addEventListener("click", () => {
-    sentencePlayed = true;
-    sentencePlayCount++;
-    const log = document.getElementById("sentence-log");
-    if (log) log.textContent = sentenceLogText();
-  });
-  return btn;
-}
-
 function finishLevel() {
+  const level = state.level;
+  const missed = [
+    ...(state.discrimination.drill ? state.discrimination.drill.movedOn : []),
+    ...(state.encode.drill ? state.encode.drill.movedOn : [])
+  ];
+  const uniqueMissed = [...new Set(missed.map((m) => m.word))];
+
   root.innerHTML = "";
   root.appendChild(
     el("div", { class: "card complete-card" }, [
       el("h2", {}, "Level complete"),
-      el("p", {}, `"${state.level.patternA.grapheme}" vs "${state.level.patternB.grapheme}" — all five stages done.`),
+      el("p", {}, `"${level.patternA.grapheme}" vs "${level.patternB.grapheme}" — all five stages done.`),
+      el("p", { class: "stars" }, `★ ${state.score} points   —   best streak 🔥 ${state.bestStreak}`),
       el(
         "p",
         { class: "muted" },
-        sentencePlayed ? "Final sentence was played — go write it up." : "Note: the final sentence was never played."
+        dictationPlayed.size
+          ? `Played ${dictationPlayed.size} / ${level.dictation.words.length} dictation words — go write them up.`
+          : "Note: none of the dictation words were played."
       ),
+      uniqueMissed.length
+        ? el("p", { class: "muted" }, "Words to revisit next time: " + uniqueMissed.join(", "))
+        : null,
       el("button", { class: "btn btn-secondary", onclick: restart }, "Restart this level")
     ])
   );
@@ -621,13 +789,16 @@ function finishLevel() {
 
 function restart() {
   state.stageIndex = 0;
-  state.discrimination = { queue: [], i: 0, correct: 0, awaitingRetry: false };
+  state.discrimination = { drill: null };
   state.production = { queue: [], i: 0 };
-  state.encode = { queue: [], i: 0, correct: 0 };
-  sentencePlayed = false;
-  sentencePlayCount = 0;
+  state.encode = { drill: null };
+  state.score = 0;
+  state.streak = 0;
+  state.bestStreak = 0;
+  dictationPlayed.clear();
   Recorder.discardUrl();
   Recorder.releaseMic();
+  renderScoreboard();
   renderStageDots();
   renderCurrentStage();
 }
